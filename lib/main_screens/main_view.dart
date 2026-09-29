@@ -44,78 +44,78 @@ class MainView extends StatelessWidget {
       ),
       body: SafeArea(
         child: SingleChildScrollView(
-          padding: EdgeInsets.symmetric(horizontal: 20.w, vertical: 24.h),
+          padding: EdgeInsets.symmetric(horizontal: 20.w, vertical: 0.h),
           physics: const BouncingScrollPhysics(),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               // Top Welcome Banner Card
-              Container(
-                padding: EdgeInsets.all(20.r),
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [
-                      AppColors.primary,
-                      AppColors.primaryLight,
-                    ],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(20.r),
-                  boxShadow: [
-                    BoxShadow(
-                      color: AppColors.primary.withOpacity(0.25),
-                      blurRadius: 15,
-                      offset: const Offset(0, 6),
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 56.w,
-                      height: 56.w,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.2),
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: Colors.white.withOpacity(0.4),
-                          width: 1.5,
-                        ),
-                      ),
-                      child: Icon(
-                        Icons.face_retouching_natural_rounded,
-                        size: 32.sp,
-                        color: Colors.white,
-                      ),
-                    ),
-                    SizedBox(width: 16.w),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Welcome Back!',
-                            style: TextStyle(
-                              fontSize: 18.sp,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
-                            ),
-                          ),
-                          SizedBox(height: 4.h),
-                          Text(
-                            'Employee ID: $employeeId',
-                            style: TextStyle(
-                              fontSize: 13.sp,
-                              color: Colors.white.withOpacity(0.9),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
+              // Container(
+              //   padding: EdgeInsets.all(20.r),
+              //   decoration: BoxDecoration(
+              //     gradient: const LinearGradient(
+              //       colors: [
+              //         AppColors.primary,
+              //         AppColors.primaryLight,
+              //       ],
+              //       begin: Alignment.topLeft,
+              //       end: Alignment.bottomRight,
+              //     ),
+              //     borderRadius: BorderRadius.circular(20.r),
+              //     boxShadow: [
+              //       BoxShadow(
+              //         color: AppColors.primary.withOpacity(0.25),
+              //         blurRadius: 15,
+              //         offset: const Offset(0, 6),
+              //       ),
+              //     ],
+              //   ),
+              //   child: Row(
+              //     children: [
+              //       Container(
+              //         width: 56.w,
+              //         height: 56.w,
+              //         decoration: BoxDecoration(
+              //           color: Colors.white.withOpacity(0.2),
+              //           shape: BoxShape.circle,
+              //           border: Border.all(
+              //             color: Colors.white.withOpacity(0.4),
+              //             width: 1.5,
+              //           ),
+              //         ),
+              //         child: Icon(
+              //           Icons.face_retouching_natural_rounded,
+              //           size: 32.sp,
+              //           color: Colors.white,
+              //         ),
+              //       ),
+              //       SizedBox(width: 16.w),
+              //       Expanded(
+              //         child: Column(
+              //           crossAxisAlignment: CrossAxisAlignment.start,
+              //           children: [
+              //             Text(
+              //               'Welcome Back!',
+              //               style: TextStyle(
+              //                 fontSize: 18.sp,
+              //                 fontWeight: FontWeight.bold,
+              //                 color: Colors.white,
+              //               ),
+              //             ),
+              //             SizedBox(height: 4.h),
+              //             Text(
+              //               'Employee ID: $employeeId',
+              //               style: TextStyle(
+              //                 fontSize: 13.sp,
+              //                 color: Colors.white.withOpacity(0.9),
+              //               ),
+              //             ),
+              //           ],
+              //         ),
+              //       ),
+              //     ],
+              //   ),
+              // ),
 
               SizedBox(height: 32.h),
 

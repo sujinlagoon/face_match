@@ -1,8 +1,10 @@
 
 import 'dart:io';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:get/get_navigation/src/root/get_material_app.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import 'helpers/routes.dart';
 
@@ -14,7 +16,7 @@ class MyHttpOverrides extends HttpOverrides {
           (X509Certificate cert, String host, int port) => true;
   }
 }
-
+final AudioPlayer touchPlayer = AudioPlayer();
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   HttpOverrides.global = MyHttpOverrides();
@@ -27,20 +29,26 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ScreenUtilInit(
-      // Standard base reference size (width x height)
       designSize: const Size(390, 844),
       minTextAdapt: true,
       splitScreenMode: true,
       builder: (context, child) {
-        return GetMaterialApp(
-          title: 'Flutter Demo',
-          debugShowCheckedModeBanner: false,
-          theme: ThemeData(
-            colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-            useMaterial3: true,
+        return Listener(
+          onPointerDown: (_) {
+            touchPlayer.play(
+              AssetSource('sound/tap.mp3'),
+            );
+          },
+          child: GetMaterialApp(
+            title: 'Flutter Demo',
+            debugShowCheckedModeBanner: false,
+            theme: ThemeData(
+              useMaterial3: true,
+              textTheme: GoogleFonts.playTextTheme(),
+            ),
+            initialRoute: AppPages.initial,
+            getPages: AppPages.routes,
           ),
-          initialRoute: AppPages.initial,
-          getPages: AppPages.routes,
         );
       },
     );

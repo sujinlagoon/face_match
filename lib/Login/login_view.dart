@@ -34,29 +34,11 @@ class LoginView extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.center,
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        Center(
-                          child: Container(
-                            width: 76.w,
-                            height: 76.w,
-                            decoration: BoxDecoration(
-                              color: AppColors.primary.withOpacity(0.08),
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                color: AppColors.primary.withOpacity(0.15),
-                                width: 2,
-                              ),
-                            ),
-                            child: Icon(
-                              Icons.face_retouching_natural_rounded,
-                              size: 40.sp,
-                              color: AppColors.primary,
-                            ),
-                          ),
-                        ),
-                        SizedBox(height: 24.h),
+
 
                         Center(
                           child: Text(
+
                             'FaceTick',
                             style: TextStyle(
                               fontSize: 24.sp,

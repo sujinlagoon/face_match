@@ -234,17 +234,37 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
           }
 
           if (matchedEmp != null) {
+            print("🔥 FACE MATCHED");
+            print("🔥 EmployeeNo: ${matchedEmp.employeeNo}");
+            print("🔥 Name: ${matchedEmp.name}");
             final key = matchedEmp.employeeNo ??
                 matchedEmp.mobileCode ??
                 matchedEmp.name ??
                 "";
+
             final isNewMatch = !_matchedEmployeesMap.containsKey(key);
+            print("🔥 Match Key: $key");
+            print("🔥 Is New Match: $isNewMatch");
 
             _matchedEmployeesMap[key] = matchedEmp;
 
             if (isNewMatch) {
               HapticFeedback.lightImpact();
+
+              // ========================================================
+              // MATCHED EMPLOYEE -> CHECK STATUS API
+              // ========================================================
+              print("🔥 CALLING CHECK STATUS API");
+              // EmployeeNo is passed to CheckStatus API
+              await controller.checkStatusForMatchedEmployee(
+                matchedEmp,
+              );
+              print("🔥 CHECK STATUS FLOW COMPLETED");
+            } else {
+              print("⚠️ CHECK STATUS SKIPPED - ALREADY MATCHED");
             }
+
+
 
             frameOverlays.add(
               RecognizedFaceData(
@@ -253,14 +273,6 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
                 name: matchedEmp.name,
                 mobileCode: matchedEmp.mobileCode,
                 employeeNo: matchedEmp.employeeNo,
-                similarity: bestSimilarity,
-              ),
-            );
-          } else {
-            frameOverlays.add(
-              RecognizedFaceData(
-                boundingBox: face.boundingBox,
-                isMatched: false,
                 similarity: bestSimilarity,
               ),
             );
