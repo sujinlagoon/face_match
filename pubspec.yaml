@@ -47,6 +47,10 @@ dependencies:
   geocoding:
   ntp:
   device_info_plus:
+  sqflite: ^2.3.3+1
+  shared_preferences: ^2.3.2
+  connectivity_plus: ^6.1.4
+  path: ^1.9.0
 
 dev_dependencies:
   flutter_test:

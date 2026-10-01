@@ -9,9 +9,15 @@ import 'package:get/get.dart';
 import 'package:http/http.dart' as http;
 import 'package:ntp/ntp.dart';
 
+import '../../data/models/attendance_history_model.dart';
+import '../../data/models/shift_model.dart';
 import '../../data/url.dart';
 import '../../helpers/location_service.dart';
 import '../../services/face_service/face_matcher_v2.dart';
+import '../../services/network/network_controller.dart';
+import '../../services/offline/offline_cache_service.dart';
+import '../../services/offline/offline_punch_store.dart';
+import '../../services/offline/offline_services.dart';
 import '../../widgets/custom_toast.dart';
 import '../model/profile_face_model.dart';
 
@@ -115,8 +121,6 @@ class FaceMatchController extends GetxController {
                 "${employeeList.length} employees with embeddings "
                 "(total received: ${parsedList.length})",
           );
-
-          // Debug employee information
           for (final employee in employeeList) {
             print(
               "[FaceMatchController] "
@@ -126,6 +130,9 @@ class FaceMatchController extends GetxController {
             );
           }
         }
+
+        // ── Cache employee list for offline 1:N recognition ───────────────
+        await OfflineCacheService.cacheEmployeeList(employeeList);
 
         return true;
       } else {
@@ -329,13 +336,16 @@ class FaceMatchController extends GetxController {
   // CHECK STATUS FOR MATCHED EMPLOYEE
   // ============================================================
 
-  /// Calls CheckStatus API only once for each employee
-  /// during the current face recognition session.
+  /// Runs the full check-status → punch flow for a matched employee.
+  ///
+  /// - When **online**: calls CheckStatus API → newInOut API → caches history.
+  /// - When **offline**: resolves status from cached history → stores punch locally.
+  ///
+  /// De-duplicated per session via [_checkStatusRequestedEmployees].
   Future<bool> checkStatusForMatchedEmployee(
-      EmployeeModel employee,
-      ) async {
-    // IMPORTANT:
-    // In this project, Employee ID comes from mobileCode
+    EmployeeModel employee,
+  ) async {
+    // Employee ID = mobileCode in this project
     final String? empId = employee.mobileCode;
 
     print("🔥 checkStatusForMatchedEmployee ENTERED");
@@ -343,116 +353,275 @@ class FaceMatchController extends GetxController {
 
     if (empId == null || empId.isEmpty) {
       print("❌ Employee ID is empty");
-
-      CustomToast.showError(
-        "Please check your status",
-      );
-
+      CustomToast.showError("Please check your status");
       return false;
     }
 
-    // Prevent duplicate CheckStatus API call
+    // Prevent duplicate calls within the same session
     if (_checkStatusRequestedEmployees.contains(empId)) {
       print("⚠️ CheckStatus already requested for: $empId");
       return true;
     }
-
     _checkStatusRequestedEmployees.add(empId);
 
     try {
-      // ==========================================
-      // 1. CHECK STATUS API
-      // ==========================================
+      // ── Connectivity check ────────────────────────────────────────────────
+      final bool online = await _isOnline();
+      print("🌐 Network: ${online ? 'ONLINE' : 'OFFLINE'}");
 
-      print("🔥 CALLING CHECK STATUS API: $empId");
-
-      final bool statusSuccess = await getCheckStatus(
-        empId: empId,
-      );
-
-      print("🔥 CHECK STATUS RESULT: $statusSuccess");
-
-      // ==========================================
-      // 2. API FAILED / EMPTY
-      // ==========================================
-
-      if (!statusSuccess) {
-        print("❌ CheckStatus failed/empty: $empId");
-
-        CustomToast.showError(
-          "Please check your status",
-        );
-
-        _checkStatusRequestedEmployees.remove(empId);
-
-        return false;
+      if (online) {
+        return await _onlinePunchFlow(empId);
+      } else {
+        return await _offlinePunchFlow(empId);
       }
-
-      // ==========================================
-      // 3. GET THIS EMPLOYEE'S STATUS
-      // ==========================================
-
-      final List<CheckStatusModel>? statusList =
-      employeeCheckStatusMap[empId];
-
-      if (statusList == null || statusList.isEmpty) {
-        print("❌ No CheckStatus data for: $empId");
-
-        CustomToast.showError(
-          "Please check your status",
-        );
-
-        _checkStatusRequestedEmployees.remove(empId);
-
-        return false;
-      }
-
-      final CheckStatusModel employeeStatus =
-          statusList.first;
-
-      print(
-        "✅ CHECK STATUS FOUND\n"
-            "Employee ID: $empId\n"
-            "Status: ${employeeStatus.status}",
-      );
-
-      // ==========================================
-      // 4. NEW IN OUT
-      // ==========================================
-
-      final bool punchSuccess = await newInOut(
-        empId: empId,
-        checkStatus: employeeStatus,
-      );
-
-      print(
-        "🔥 NEW IN OUT RESULT: ""$empId -> $punchSuccess -->$employeeStatus",
-      );
-
-      if (!punchSuccess) {
-        _checkStatusRequestedEmployees.remove(empId);
-
-        CustomToast.showError(
-          "Unable to update your status",
-        );
-
-        return false;
-      }
-
-      return true;
     } catch (e) {
-      print(
-        "❌ CheckStatus flow error for $empId: $e",
-      );
-
+      print("❌ checkStatusForMatchedEmployee error for $empId: $e");
       _checkStatusRequestedEmployees.remove(empId);
-
-      CustomToast.showError(
-        "Please check your status",
-      );
-
+      CustomToast.showError("Please check your status");
       return false;
     }
+  }
+
+  // ============================================================
+  // ONLINE PUNCH FLOW
+  // ============================================================
+
+  Future<bool> _onlinePunchFlow(String empId) async {
+    print("🔥 [ONLINE] Starting online punch flow for $empId");
+
+    // 1. Fetch shift from server and cache it (stores employeeNo on model)
+    await _fetchAndCacheShift(empId);
+    final ShiftModel? shift = await OfflineCacheService.getShift(empId);
+
+    CheckStatusModel? employeeStatus;
+
+    // 2. Check unsynced local punches first — server doesn't know about them yet (same as Timetick)
+    final String? unsyncedStatus = await OfflineServices.resolveFromUnsyncedRecords(
+      empId,
+      shift: shift,
+    );
+
+    if (unsyncedStatus != null) {
+      print("⚡ [ONLINE] Preferring unsynced local punch status: $unsyncedStatus for $empId");
+      employeeStatus = CheckStatusModel(
+        status: unsyncedStatus,
+        latestPunchTime: DateTime.now().toIso8601String(),
+        punchDate: DateTime.now().toIso8601String(),
+        id: '',
+        checkedInForShift: unsyncedStatus.toLowerCase() == 'checkin',
+      );
+    } else {
+      // 3. Check Status API
+      final bool statusSuccess = await getCheckStatus(empId: empId);
+      final List<CheckStatusModel>? statusList = employeeCheckStatusMap[empId];
+
+      if (statusSuccess && statusList != null && statusList.isNotEmpty) {
+        employeeStatus = statusList.first;
+      } else {
+        // Fallback to shift-based OfflineServices resolution
+        print("⚠️ [ONLINE] CheckStatus API unavailable, falling back to OfflineServices for $empId");
+        employeeStatus = await OfflineServices.determineCheckStatus(empId, shift: shift);
+      }
+    }
+
+    print("✅ [ONLINE] CHECK STATUS: ${employeeStatus.status} for $empId");
+
+    // 4. newInOut API
+    final bool punchSuccess = await newInOut(
+      empId: empId,
+      checkStatus: employeeStatus,
+    );
+
+    if (!punchSuccess) {
+      print("❌ [ONLINE] Punch failed for $empId");
+      _checkStatusRequestedEmployees.remove(empId);
+      CustomToast.showError("Unable to update your status");
+      return false;
+    }
+
+    print("✅ [ONLINE] Punch success for $empId");
+
+    // 5. Fetch + cache attendance history for future offline use
+    await _fetchAndCacheAttendanceHistory(empId);
+
+    return true;
+  }
+
+  // ============================================================
+  // OFFLINE PUNCH FLOW
+  // ============================================================
+
+  Future<bool> _offlinePunchFlow(String empId) async {
+    print("📴 [OFFLINE] Resolving status from OfflineServices for $empId");
+
+    // 1. Load cached shift (used for shift-window-aware status resolution)
+    final shift = await OfflineCacheService.getShift(empId);
+
+    // 2. Resolve status: unsynced SQLite → cached history → derived cache → default
+    final CheckStatusModel offlineStatus =
+        await OfflineServices.determineCheckStatus(empId, shift: shift);
+
+    print("📴 [OFFLINE] Resolved status: ${offlineStatus.status}");
+
+    // 3. Map status → check type
+    final String? checkType = _resolveCheckType(offlineStatus.status ?? '');
+    if (checkType == null) {
+      print("❌ [OFFLINE] Unrecognised status: ${offlineStatus.status}");
+      CustomToast.showError("Please check your status");
+      _checkStatusRequestedEmployees.remove(empId);
+      return false;
+    }
+
+    // 4. Collect location + NTP time + device ID
+    LocationDataResult locData;
+    try {
+      locData = await LocationService.getCurrentLocationData().timeout(
+        const Duration(seconds: 4),
+        onTimeout: () => const LocationDataResult(
+            latitude: '', longitude: '', address: ''),
+      );
+    } catch (_) {
+      locData =
+          const LocationDataResult(latitude: '', longitude: '', address: '');
+    }
+
+    final DateTime punchTime = await getNtpTime();
+    final String deviceId   = await getDeviceId();
+
+    // 5. Store punch locally in SQLite
+    await OfflinePunchStore.storePunch(
+      employeeNo: empId,
+      checkType:  checkType,
+      dateTime:   punchTime,
+      latitude:   locData.latitude,
+      longitude:  locData.longitude,
+      location:   locData.address,
+      deviceId:   deviceId,
+    );
+
+    // 6. Update cached attendance history & derived status so next resolve is correct
+    await OfflineServices.updateCachedStatusAfterPunch(
+      employeeNo: empId,
+      checkType:  checkType,
+      punchTime:  punchTime,
+      shift:      shift,
+    );
+
+    print("✅ [OFFLINE] Punch stored locally: $checkType for $empId");
+    CustomToast.showSuccess("Punch saved offline — will sync when online");
+    return true;
+  }
+
+  // ============================================================
+  // ATTENDANCE HISTORY — FETCH & CACHE
+  // ============================================================
+
+  /// Fetches today's attendance history for [employeeNo] and caches it.
+  /// Called after every successful online punch. Non-fatal on failure.
+  Future<void> _fetchAndCacheAttendanceHistory(String employeeNo) async {
+    try {
+      final uri = Uri.parse(
+        '${Url.attendanceHistory}?EmployeeNo=$employeeNo',
+      );
+
+      if (kDebugMode) {
+        print('[FaceMatchController] Fetching history for $employeeNo: $uri');
+      }
+
+      final response = await http
+          .get(uri)
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final list = AttendanceHistoryModel.listFromJson(
+          response.body,
+          employeeNo: employeeNo,
+        );
+        await OfflineCacheService.cacheHistory(employeeNo, list);
+
+        if (kDebugMode) {
+          print('[FaceMatchController] ✅ History cached for $employeeNo (${list.length} records)');
+        }
+      } else {
+        if (kDebugMode) {
+          print('[FaceMatchController] ⚠️ History API ${response.statusCode} for $employeeNo');
+        }
+      }
+    } catch (e) {
+      // Non-fatal — the punch already succeeded
+      if (kDebugMode) {
+        print('[FaceMatchController] ⚠️ History cache skipped: $e');
+      }
+    }
+  }
+
+  // ============================================================
+  // SHIFT — FETCH & CACHE
+  // ============================================================
+
+  /// Fetches shift from ShiftMasterAPI for [employeeNo] and caches it.
+  /// Called at the start of every online punch flow. Non-fatal on failure.
+  Future<void> _fetchAndCacheShift(String employeeNo) async {
+    try {
+      final uri = Uri.parse('${Url.shiftMaster}?EmployeeNo=$employeeNo');
+      final response =
+          await http.get(uri).timeout(const Duration(seconds: 8));
+
+      if (response.statusCode == 200) {
+        final shift = ShiftModel.firstFromJson(
+          response.body,
+          employeeNo: employeeNo,
+        );
+        if (shift != null) {
+          await OfflineCacheService.cacheShift(employeeNo, shift);
+          if (kDebugMode) {
+            print('[FaceMatchController] ✅ Shift cached for $employeeNo: '
+                '${shift.shiftName} (${shift.inTime} – ${shift.outTime})');
+          }
+        }
+      } else {
+        if (kDebugMode) {
+          print('[FaceMatchController] ⚠️ Shift API ${response.statusCode} for $employeeNo');
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        print('[FaceMatchController] ⚠️ Shift fetch skipped: $e');
+      }
+    }
+  }
+
+  // ============================================================
+  // HELPERS
+  // ============================================================
+
+  /// Returns true when the device has a working API connection.
+  Future<bool> _isOnline() async {
+    try {
+      if (Get.isRegistered<NetworkController>()) {
+        return await Get.find<NetworkController>().checkConnectivity();
+      }
+      // Fallback: quick HTTP ping
+      final response = await http
+          .get(Uri.parse(Url.healthCheck))
+          .timeout(const Duration(seconds: 4));
+      return response.statusCode < 500;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Maps CheckStatus API status string → platform-specific CheckType string.
+  /// Returns null for unrecognised statuses.
+  static String? _resolveCheckType(String status) {
+    final s = status.trim().toLowerCase();
+    if (s == 'checkin') {
+      return Platform.isAndroid ? 'Android_Out' : 'IOS_OUT';
+    }
+    if (s == 'checkout' || s == 'out') {
+      return Platform.isAndroid ? 'Android_IN' : 'IN';
+    }
+    return null;
   }  // ============================================================
   // CLEAR SESSION
   // ============================================================
@@ -544,27 +713,8 @@ class FaceMatchController extends GetxController {
     required CheckStatusModel checkStatus,
   }) async {
     try {
-      String checkType = "NA";
-
-      final String status =
-          checkStatus.status?.trim().toLowerCase() ?? "";
-
-      // CheckStatus API:
-      // checkin -> punch API checkout
-      // out     -> punch API in
-      if (status == "checkin") {
-        if (Platform.isAndroid) {
-          checkType = "Android_Out";
-        } else if (Platform.isIOS) {
-          checkType = "IOS_OUT";
-        }
-      } else if (status == "checkout" || status == "out") {
-        if (Platform.isAndroid) {
-          checkType = "Android_IN";
-        } else if (Platform.isIOS) {
-          checkType = "IN";
-        }
-      } else {
+      final String? checkType = _resolveCheckType(checkStatus.status ?? '');
+      if (checkType == null) {
         CustomToast.showError("Please check your status");
         return false;
       }

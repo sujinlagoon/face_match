@@ -5,4 +5,8 @@ class Url {
   static const String faceMatch = '$baseUrl/Profile/TimeKeeperProfileFace';
   static const String checkStatus = '$baseUrl/IO/CheckStatus';
   static const String newCheckInURL = "$baseUrl/IO/IOUPDATED/";
+  static const String attendanceHistory =
+      '$baseUrl/AttendanceHistory/AttendanceHistory';
+  static const String shiftMaster = '$baseUrl/Profile/ShiftMasterAPI';
+  static const String healthCheck = '$baseUrl/HealthCheck/Ping';
 }
