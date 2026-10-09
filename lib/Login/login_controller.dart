@@ -61,7 +61,7 @@ class LoginController extends GetxController {
       };
 
       final uri = Uri.parse(
-        'https://api.ltcloud247.com/api/Login/TimeKepperLogin',
+        Url.timeKeeperLogin,
       ).replace(
         queryParameters: params,
       );

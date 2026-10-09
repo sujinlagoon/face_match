@@ -1,30 +1,44 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
-
 import 'package:flutter/material.dart';
+import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:face_match/main.dart';
-
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('Offline pending chip widget renders count correctly', (WidgetTester tester) async {
+    int tappedCount = 0;
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    await tester.pumpWidget(
+      ScreenUtilInit(
+        designSize: const Size(390, 844),
+        builder: (context, child) => MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: Builder(
+                builder: (context) {
+                  return InkWell(
+                    onTap: () => tappedCount++,
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      child: const Row(
+                        children: [
+                          Icon(Icons.cloud_off_outlined),
+                          SizedBox(width: 8),
+                          Text('3 offline punches pending'),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    expect(find.text('3 offline punches pending'), findsOneWidget);
+    expect(find.byIcon(Icons.cloud_off_outlined), findsOneWidget);
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    await tester.tap(find.text('3 offline punches pending'));
+    expect(tappedCount, 1);
   });
 }

@@ -12,8 +12,11 @@ import '../services/face_service/face_aligner_v2.dart';
 import '../services/face_service/face_detector.dart';
 import '../services/face_service/face_embedding_v2.dart';
 import '../services/face_service/face_matcher_v2.dart';
+import '../services/network/network_controller.dart';
+import '../widgets/custom_toast.dart';
 import 'controller/face_match_controller.dart';
 import 'model/profile_face_model.dart';
+import 'model/punch_result_model.dart';
 
 /// Real-time detected face information for on-screen AR overlay
 class RecognizedFaceData {
@@ -23,6 +26,7 @@ class RecognizedFaceData {
   final String? mobileCode;
   final String? employeeNo;
   final double similarity;
+  final String? punchAction;
 
   RecognizedFaceData({
     required this.boundingBox,
@@ -31,6 +35,7 @@ class RecognizedFaceData {
     this.mobileCode,
     this.employeeNo,
     this.similarity = 0.0,
+    this.punchAction,
   });
 }
 
@@ -56,12 +61,24 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
   CameraController? _controller;
   bool _isInitializing = true;
   bool _isProcessingFrame = false;
+  bool _isMatchLocked = false;
   String _statusMessage = "Loading face profiles...";
 
   // Real-time overlay tracking
   List<RecognizedFaceData> _currentFaces = [];
   Size _lastImageSize = Size.zero;
   final Map<String, EmployeeModel> _matchedEmployeesMap = {};
+  final Map<String, PunchFlowResult> _employeePunchResultMap = {};
+  final Map<String, DateTime> _employeeLastPunchTimeMap = {};
+
+  // Active matched employee & punch countdown state
+  EmployeeModel? _activeMatchedEmployee;
+  PunchAction? _activeAction;
+  bool _isPunchOffline = false;
+  bool _isPunchLoading = false;
+  PunchFlowResult? _completedPunchResult;
+  int _countdownSeconds = 5;
+  Timer? _countdownTimer;
 
   late AnimationController _scannerAnimationController;
   late AnimationController _pulseAnimationController;
@@ -160,7 +177,7 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
         return;
       }
 
-      if (_isProcessingFrame) return;
+      if (_isProcessingFrame || _isMatchLocked) return;
       _isProcessingFrame = true;
 
       File? imageFile;
@@ -234,37 +251,27 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
           }
 
           if (matchedEmp != null) {
+            // ── Lock further matches immediately ────────────────────────────
+            _isMatchLocked = true;
+
             print("🔥 FACE MATCHED");
             print("🔥 EmployeeNo: ${matchedEmp.employeeNo}");
             print("🔥 Name: ${matchedEmp.name}");
-            final key = matchedEmp.employeeNo ??
-                matchedEmp.mobileCode ??
-                matchedEmp.name ??
-                "";
+            final key = matchedEmp.effectiveEmployeeNo.isNotEmpty
+                ? matchedEmp.effectiveEmployeeNo
+                : (matchedEmp.name ?? "");
 
-            final isNewMatch = !_matchedEmployeesMap.containsKey(key);
-            print("🔥 Match Key: $key");
-            print("🔥 Is New Match: $isNewMatch");
+            final lastPunchTime = _employeeLastPunchTimeMap[key];
+            final now = DateTime.now();
+            final bool isWithinCooldown = lastPunchTime != null &&
+                now.difference(lastPunchTime).inSeconds < 5;
 
-            _matchedEmployeesMap[key] = matchedEmp;
-
-            if (isNewMatch) {
-              HapticFeedback.lightImpact();
-
-              // ========================================================
-              // MATCHED EMPLOYEE -> CHECK STATUS API
-              // ========================================================
-              print("🔥 CALLING CHECK STATUS API");
-              // EmployeeNo is passed to CheckStatus API
-              await controller.checkStatusForMatchedEmployee(
-                matchedEmp,
-              );
-              print("🔥 CHECK STATUS FLOW COMPLETED");
-            } else {
-              print("⚠️ CHECK STATUS SKIPPED - ALREADY MATCHED");
+            if (isWithinCooldown) {
+              _isMatchLocked = false;
+              break;
             }
 
-
+            _matchedEmployeesMap[key] = matchedEmp;
 
             frameOverlays.add(
               RecognizedFaceData(
@@ -276,6 +283,146 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
                 similarity: bestSimilarity,
               ),
             );
+
+            // Step 1: Look for match -> matched! Lock flow & set full-width card initial state
+            if (mounted) {
+              setState(() {
+                _activeMatchedEmployee = matchedEmp;
+                _activeAction = null;
+                _isPunchLoading = true;
+                _completedPunchResult = null;
+                _countdownSeconds = 5;
+                _currentFaces = frameOverlays;
+                if (imageSize.width > 0 && imageSize.height > 0) {
+                  _lastImageSize = imageSize;
+                }
+                _statusMessage =
+                    "Resolving status for ${matchedEmp?.name ?? 'Employee'}...";
+              });
+            }
+
+            PunchFlowResult? punchResult;
+            try {
+              HapticFeedback.lightImpact();
+
+              // ========================================================
+              // Step 2 & 3: Get checkstatus -> show UI (checking in or out with loader)
+              // Step 4: API call (newInOut / storePunch)
+              // ========================================================
+              print("🔥 CALLING CHECK STATUS & CHECKINOUT API FOR $key");
+              punchResult = await controller.checkStatusForMatchedEmployee(
+                matchedEmp,
+                onStatusResolved: (PunchAction action, bool isOffline) {
+                  if (mounted) {
+                    setState(() {
+                      _activeAction = action;
+                      _isPunchOffline = isOffline;
+                      _isPunchLoading = true;
+                      final actionLabel = action == PunchAction.checkIn
+                          ? "Checking In"
+                          : "Checking Out";
+                      _statusMessage =
+                          "$actionLabel: ${matchedEmp?.name ?? 'Employee'}...";
+                    });
+                  }
+                },
+              );
+              print(
+                "🔥 CHECK STATUS & CHECKINOUT FLOW COMPLETED: ${punchResult.actionLabel}",
+              );
+
+              if (punchResult.success && punchResult.action != null) {
+                _employeePunchResultMap[key] = punchResult;
+                _employeeLastPunchTimeMap[key] = DateTime.now();
+                _completedPunchResult = punchResult;
+                _activeAction = punchResult.action;
+                _isPunchOffline = punchResult.isOffline;
+                _isPunchLoading = false;
+
+                final action = punchResult.actionLabel;
+                if (punchResult.isOffline) {
+                  HapticFeedback.heavyImpact();
+                  _statusMessage =
+                      "📴 ${matchedEmp.name ?? 'Employee'} $action • ${punchResult.formattedTime} (Saved Offline)";
+                  CustomToast.showSuccess(
+                    "Offline Punch Saved: ${matchedEmp.name ?? 'Employee'} $action (Saved to local device)",
+                  );
+                } else {
+                  HapticFeedback.lightImpact();
+                  _statusMessage =
+                      "✅ ${matchedEmp.name ?? 'Employee'} $action • ${punchResult.formattedTime} (Synced Online)";
+                  CustomToast.showSuccess(
+                    "${matchedEmp.name ?? 'Employee'} $action (Synced Online)",
+                  );
+                }
+              } else {
+                _isPunchLoading = false;
+                _completedPunchResult = punchResult;
+                _statusMessage = punchResult.message ?? "Punch failed";
+              }
+            } catch (e) {
+              debugPrint("❌ Error in checkStatusForMatchedEmployee: $e");
+              punchResult = PunchFlowResult(
+                success: false,
+                timestamp: DateTime.now(),
+                employeeNo: key,
+                employeeName: matchedEmp.name ?? "Employee",
+                message: e.toString(),
+              );
+              _isPunchLoading = false;
+              _completedPunchResult = punchResult;
+            } finally {
+              if (mounted) {
+                setState(() {
+                  _isPunchLoading = false;
+                });
+              }
+
+              // ========================================================
+              // Step 5: Lock release with a 5-second countdown delay:
+              // "Punch available in $countdown seconds"
+              // ========================================================
+              _countdownSeconds = 5;
+              _countdownTimer?.cancel();
+              final completer = Completer<void>();
+              _countdownTimer = Timer.periodic(
+                const Duration(seconds: 1),
+                (timer) {
+                  if (!mounted) {
+                    timer.cancel();
+                    if (!completer.isCompleted) completer.complete();
+                    return;
+                  }
+                  setState(() {
+                    _countdownSeconds--;
+                  });
+                  if (_countdownSeconds <= 0) {
+                    timer.cancel();
+                    if (!completer.isCompleted) completer.complete();
+                  }
+                },
+              );
+
+              await completer.future;
+
+              if (mounted) {
+                setState(() {
+                  _activeMatchedEmployee = null;
+                  _activeAction = null;
+                  _completedPunchResult = null;
+                  _isPunchLoading = false;
+                  _countdownSeconds = 5;
+                  _currentFaces = [];
+                  _statusMessage = controller.employeeList.isNotEmpty
+                      ? "Multi-Face AI Active • ${controller.employeeList.length} Profiles"
+                      : "Multi-Face AI Active";
+                });
+              }
+
+              _isMatchLocked = false;
+            }
+
+            break; // Stop evaluating remaining faces in this frame
           }
         }
 
@@ -303,6 +450,7 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
   @override
   void dispose() {
     _matchingTimer?.cancel();
+    _countdownTimer?.cancel();
     _scannerAnimationController.dispose();
     _pulseAnimationController.dispose();
     _controller?.dispose();
@@ -312,33 +460,57 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
   @override
   Widget build(BuildContext context) {
     final screenSize = MediaQuery.of(context).size;
-    final matchedList = _matchedEmployeesMap.values.toList();
 
     return Scaffold(
       backgroundColor: Colors.black,
       extendBodyBehindAppBar: true,
       appBar: AppBar(
-        title: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              decoration: const BoxDecoration(
-                color: Color(0xFF00E676),
-                shape: BoxShape.circle,
-              ),
-            ),
-            const SizedBox(width: 8),
-            const Text(
-              "Live Biometric Recognition",
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-                fontSize: 16,
-              ),
-            ),
-          ],
+        title: Builder(
+          builder: (_) {
+            if (!Get.isRegistered<NetworkController>()) {
+              return const Text(
+                "Live Biometric Recognition",
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 16,
+                ),
+              );
+            }
+            final netCtrl = Get.find<NetworkController>();
+            return Obx(() {
+              final isOnline = netCtrl.isConnected.value;
+              final isSyncing = netCtrl.isSyncing.value;
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: BoxDecoration(
+                      color: isOnline
+                          ? const Color(0xFF00E676)
+                          : const Color(0xFFFF9100),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    isSyncing
+                        ? "Syncing Punches..."
+                        : (isOnline
+                            ? "Live Biometric Recognition"
+                            : "Offline Biometric Mode"),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15,
+                    ),
+                  ),
+                ],
+              );
+            });
+          },
         ),
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -355,6 +527,38 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
           ),
           onPressed: () => Navigator.of(context).pop(),
         ),
+        actions: [
+          if (Get.isRegistered<NetworkController>())
+            Obx(() {
+              final netCtrl = Get.find<NetworkController>();
+              final isSyncing = netCtrl.isSyncing.value;
+              return IconButton(
+                icon: isSyncing
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.sync_rounded, color: Colors.white, size: 20),
+                tooltip: "Sync Offline Punches",
+                onPressed: isSyncing
+                    ? null
+                    : () async {
+                        final res = await netCtrl.syncNow();
+                        if (res.syncedCount > 0) {
+                          CustomToast.showSuccess("Synced ${res.syncedCount} punch(es)");
+                        } else if (!netCtrl.isConnected.value) {
+                          CustomToast.showError("Device is offline");
+                        } else {
+                          CustomToast.showSuccess("All punches up to date");
+                        }
+                      },
+              );
+            }),
+        ],
       ),
       body: Stack(
         fit: StackFit.expand,
@@ -460,208 +664,589 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
             ),
           ),
 
-          // 4. Bottom Live Recognition Dock (Non-blocking, Real-Time MobileCode Display)
+          // 4. Bottom Live Recognition Dock (Full-Width Matched Employee Flow or Scanning HUD)
           SafeArea(
             child: Align(
               alignment: Alignment.bottomCenter,
               child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (matchedList.isNotEmpty)
-                      _buildLiveMatchedCarousel(matchedList)
-                    else
-                      _buildIdleScanningHUD(),
-                  ],
+                margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 320),
+                  transitionBuilder: (child, animation) {
+                    return FadeTransition(
+                      opacity: animation,
+                      child: SlideTransition(
+                        position: Tween<Offset>(
+                          begin: const Offset(0.0, 0.08),
+                          end: Offset.zero,
+                        ).animate(animation),
+                        child: child,
+                      ),
+                    );
+                  },
+                  child: _activeMatchedEmployee != null
+                      ? _buildFullWidthPunchCard(_activeMatchedEmployee!)
+                      : _buildIdleScanningHUD(),
                 ),
               ),
             ),
           ),
+
+          // 5. Persistent Offline Pill on Camera View
+          if (Get.isRegistered<NetworkController>())
+            Obx(() {
+              final isOnline = Get.find<NetworkController>().isConnected.value;
+              if (isOnline) return const SizedBox.shrink();
+              return SafeArea(
+                child: Align(
+                  alignment: Alignment.topRight,
+                  child: Container(
+                    margin: const EdgeInsets.only(top: 10, right: 16),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE53935).withValues(alpha: 0.88),
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.3),
+                          blurRadius: 8,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.wifi_off_rounded,
+                          size: 13,
+                          color: Colors.white,
+                        ),
+                        SizedBox(width: 5),
+                        Text(
+                          "OFFLINE MODE",
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: 0.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }),
         ],
       ),
     );
   }
 
-  /// Builds a bottom card showcasing the matched employees with their Mobile Code
-  Widget _buildLiveMatchedCarousel(List<EmployeeModel> matchedList) {
+  /// Builds a full-width bottom card showcasing the matched employee,
+  /// checking in/out status with an animated loader, punch confirmation, and 5-second countdown.
+  Widget _buildFullWidthPunchCard(EmployeeModel emp) {
+    final bool isOffline = _isPunchOffline ||
+        (Get.isRegistered<NetworkController>() &&
+            !Get.find<NetworkController>().isConnected.value);
+
+    final isCheckIn = _activeAction == PunchAction.checkIn;
+    final isCheckOut = _activeAction == PunchAction.checkOut;
+    final Color actionColor = isCheckIn
+        ? const Color(0xFF00E676)
+        : (isCheckOut ? const Color(0xFFFF9100) : const Color(0xFF00E5FF));
+
+    final punchResult = _completedPunchResult;
+    final bool isCompleted = punchResult != null;
+    final bool isSuccess = isCompleted && punchResult.success;
+    final bool isFailure = isCompleted && !punchResult.success;
+    final bool isLoading = _isPunchLoading;
+
+    final image = emp.userImage ?? emp.regImage;
+
     return Container(
-      constraints: const BoxConstraints(maxHeight: 180),
+      key: ValueKey("punch_card_${emp.employeeNo ?? emp.mobileCode ?? emp.name}"),
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF12141A).withOpacity(0.92),
-        borderRadius: BorderRadius.circular(20),
+        color: const Color(0xFF10131B).withValues(alpha: 0.95),
+        borderRadius: BorderRadius.circular(22),
         border: Border.all(
-          color: const Color(0xFF00E676).withOpacity(0.5),
+          color: (isFailure ? const Color(0xFFFF5252) : actionColor)
+              .withValues(alpha: 0.6),
           width: 1.5,
         ),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF00E676).withOpacity(0.2),
-            blurRadius: 20,
+            color: (isFailure ? const Color(0xFFFF5252) : actionColor)
+                .withValues(alpha: 0.22),
+            blurRadius: 24,
             spreadRadius: 1,
+            offset: const Offset(0, 6),
+          ),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.6),
+            blurRadius: 12,
             offset: const Offset(0, 4),
           ),
         ],
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Header Bar
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
-            child: Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(4),
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF00E676),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.check, size: 12, color: Colors.black),
+          // ── Header Bar ──────────────────────────────────────────────
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: isFailure
+                      ? const Color(0xFFFF5252)
+                      : (isSuccess
+                          ? const Color(0xFF00E676)
+                          : const Color(0xFF00E5FF)),
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: (isFailure
+                              ? const Color(0xFFFF5252)
+                              : (isSuccess
+                                  ? const Color(0xFF00E676)
+                                  : const Color(0xFF00E5FF)))
+                          .withValues(alpha: 0.8),
+                      blurRadius: 6,
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                const Text(
-                  "RECOGNIZED PROFILE",
-                  style: TextStyle(
-                    color: Color(0xFF00E676),
-                    fontSize: 11,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 1.0,
-                  ),
-                ),
-                const Spacer(),
-                Text(
-                  "${matchedList.length} Matched",
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.6),
-                    fontSize: 11,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const Divider(color: Colors.white12, height: 1),
-
-          // Horizontal scroll if multiple persons recognized
-          Flexible(
-            child: ListView.separated(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              scrollDirection: Axis.horizontal,
-              shrinkWrap: true,
-              itemCount: matchedList.length,
-              separatorBuilder: (_, __) => const SizedBox(width: 12),
-              itemBuilder: (context, index) {
-                final emp = matchedList[index];
-                return _buildMatchedProfileCard(emp);
-              },
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildMatchedProfileCard(EmployeeModel emp) {
-    return Container(
-      width: 250,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.06),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: Colors.white.withOpacity(0.12),
-          width: 1,
-        ),
-      ),
-      child: Row(
-        children: [
-          // Avatar
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              gradient: const LinearGradient(
-                colors: [Color(0xFF00E676), Color(0xFF00B0FF)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
               ),
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: const Color(0xFF00E676).withOpacity(0.4),
-                  blurRadius: 8,
+              const SizedBox(width: 8),
+              Text(
+                isSuccess
+                    ? "ATTENDANCE RECORDED"
+                    : (isFailure
+                        ? "ATTENDANCE ERROR"
+                        : "MATCH VERIFIED • ATTENDANCE FLOW"),
+                style: TextStyle(
+                  color: isFailure
+                      ? const Color(0xFFFF5252)
+                      : (isSuccess
+                          ? const Color(0xFF00E676)
+                          : const Color(0xFF00E5FF)),
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.8,
                 ),
-              ],
-            ),
-            child: const Icon(Icons.person, color: Colors.black87, size: 26),
+              ),
+              const Spacer(),
+              // Network indicator pill
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  color: isOffline
+                      ? const Color(0xFFFF9100).withValues(alpha: 0.16)
+                      : const Color(0xFF00E676).withValues(alpha: 0.16),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(
+                    color: isOffline
+                        ? const Color(0xFFFF9100).withValues(alpha: 0.5)
+                        : const Color(0xFF00E676).withValues(alpha: 0.5),
+                    width: 0.8,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      isOffline
+                          ? Icons.cloud_off_rounded
+                          : Icons.cloud_done_rounded,
+                      size: 11,
+                      color: isOffline
+                          ? const Color(0xFFFFB74D)
+                          : const Color(0xFF00E676),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      isOffline ? "OFFLINE" : "ONLINE",
+                      style: TextStyle(
+                        color: isOffline
+                            ? const Color(0xFFFFB74D)
+                            : const Color(0xFF00E676),
+                        fontSize: 9,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 12),
+          const SizedBox(height: 10),
+          const Divider(color: Colors.white12, height: 1),
+          const SizedBox(height: 12),
 
-          // Info Column with prominent MobileCode
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Text(
-                  emp.name ?? "Employee",
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 14,
+          // ── Matched Employee Info ───────────────────────────────────
+          Row(
+            children: [
+              // Avatar with gradient glow
+              Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      actionColor,
+                      actionColor.withValues(alpha: 0.5),
+                    ],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: actionColor.withValues(alpha: 0.35),
+                      blurRadius: 10,
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 2),
-                if (emp.employeeNo != null)
-                  Text(
-                    "ID: ${emp.employeeNo}",
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(0.6),
-                      fontSize: 11,
+                child: ClipOval(
+                  child: (image != null &&
+                          image.isNotEmpty &&
+                          image.startsWith('http'))
+                      ? Image.network(
+                          image,
+                          fit: BoxFit.cover,
+                          errorBuilder: (context, error, stackTrace) =>
+                              const Icon(
+                            Icons.person_rounded,
+                            color: Colors.black87,
+                            size: 30,
+                          ),
+                        )
+                      : const Icon(
+                          Icons.person_rounded,
+                          color: Colors.black87,
+                          size: 30,
+                        ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              // Details column
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      emp.name ?? "Employee",
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 16.5,
+                        letterSpacing: 0.2,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                  ),
-                const SizedBox(height: 6),
-
-                // Mobile Code Badge
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF00E676).withOpacity(0.18),
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(
-                      color: const Color(0xFF00E676),
-                      width: 1,
+                    const SizedBox(height: 3),
+                    Row(
+                      children: [
+                        if (emp.effectiveEmployeeNo.isNotEmpty)
+                          Text(
+                            "ID: ${emp.effectiveEmployeeNo}",
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.65),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        if (emp.department != null &&
+                            emp.department!.isNotEmpty) ...[
+                          Text(
+                            " • ${emp.department}",
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.5),
+                              fontSize: 11.5,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ],
                     ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text(
-                        "MOBILE CODE: ",
-                        style: TextStyle(
-                          color: Color(0xFF00E676),
-                          fontSize: 9.5,
-                          fontWeight: FontWeight.w800,
+                    if (emp.mobileCode != null &&
+                        emp.mobileCode!.isNotEmpty) ...[
+                      const SizedBox(height: 5),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 7, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: actionColor.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(5),
+                          border: Border.all(
+                            color: actionColor.withValues(alpha: 0.45),
+                            width: 0.8,
+                          ),
+                        ),
+                        child: Text(
+                          "CODE: ${emp.mobileCode}",
+                          style: TextStyle(
+                            color: actionColor,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.4,
+                          ),
                         ),
                       ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 14),
+
+          // ── Flow State & Action Status ──────────────────────────────
+          if (isLoading)
+            // State: Checking in or out with animated loader
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: actionColor.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: actionColor.withValues(alpha: 0.45),
+                  width: 1.2,
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    isCheckIn
+                        ? Icons.login_rounded
+                        : (isCheckOut
+                            ? Icons.logout_rounded
+                            : Icons.hourglass_top_rounded),
+                    color: actionColor,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          isCheckIn
+                              ? "CHECKING IN..."
+                              : (isCheckOut
+                                  ? "CHECKING OUT..."
+                                  : "RESOLVING STATUS..."),
+                          style: TextStyle(
+                            color: actionColor,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                        const SizedBox(height: 1),
+                        Text(
+                          isOffline
+                              ? "Storing offline biometric punch..."
+                              : "Sending attendance punch to server...",
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.6),
+                            fontSize: 11,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.4,
+                      valueColor: AlwaysStoppedAnimation<Color>(actionColor),
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else if (isSuccess)
+            // State: Checked in or out confirmation
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: actionColor.withValues(alpha: 0.16),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: actionColor.withValues(alpha: 0.75),
+                  width: 1.2,
+                ),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: actionColor,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.check,
+                      size: 14,
+                      color: Colors.black,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          isCheckIn
+                              ? "CHECKED IN SUCCESSFULLY"
+                              : "CHECKED OUT SUCCESSFULLY",
+                          style: TextStyle(
+                            color: actionColor,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.4,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          "${punchResult.formattedTime} • ${punchResult.isOffline ? 'Saved locally (auto-syncs)' : 'Synced Online'}",
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.8),
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else if (isFailure)
+            // State: Error
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFF5252).withValues(alpha: 0.16),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: const Color(0xFFFF5252).withValues(alpha: 0.75),
+                  width: 1.2,
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.error_outline_rounded,
+                    color: Color(0xFFFF5252),
+                    size: 22,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          "PUNCH FAILED",
+                          style: TextStyle(
+                            color: Color(0xFFFF5252),
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 1),
+                        Text(
+                          punchResult.message ?? "Please try again",
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.8),
+                            fontSize: 11,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+          // ── Countdown Delay (5 seconds) ─────────────────────────────
+          // "then for the delay(make it 5 seconds) -> Punch available in $countdown seconds. something like that."
+          if (!isLoading) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.05),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: Colors.white.withValues(alpha: 0.08),
+                  width: 0.8,
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.timer_outlined,
+                        size: 14,
+                        color: actionColor,
+                      ),
+                      const SizedBox(width: 7),
                       Text(
-                        emp.mobileCode ?? "N/A",
-                        style: const TextStyle(
-                          color: Colors.white,
+                        "Punch available in $_countdownSeconds ${_countdownSeconds == 1 ? 'second' : 'seconds'}",
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.9),
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.2,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        "$_countdownSeconds s",
+                        style: TextStyle(
+                          color: actionColor,
                           fontSize: 12,
                           fontWeight: FontWeight.w900,
-                          letterSpacing: 0.5,
                         ),
                       ),
                     ],
                   ),
-                ),
-              ],
+                  const SizedBox(height: 6),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: _countdownSeconds / 5.0,
+                      minHeight: 4,
+                      backgroundColor: Colors.white12,
+                      valueColor: AlwaysStoppedAnimation<Color>(actionColor),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -669,15 +1254,32 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
 
   /// Idle status bar when no face is matched yet
   Widget _buildIdleScanningHUD() {
+    final bool isOffline = Get.isRegistered<NetworkController>() &&
+        !Get.find<NetworkController>().isConnected.value;
+
+    final themeColor = isOffline
+        ? const Color(0xFFFF9100)
+        : const Color(0xFF00E5FF);
+
     return Container(
+      key: const ValueKey("idle_hud"),
+      width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
       decoration: BoxDecoration(
-        color: const Color(0xFF12141A).withOpacity(0.85),
-        borderRadius: BorderRadius.circular(16),
+        color: const Color(0xFF12141A).withValues(alpha: 0.88),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(
-          color: const Color(0xFF00E5FF).withOpacity(0.4),
+          color: themeColor.withValues(alpha: 0.4),
           width: 1.2,
         ),
+        boxShadow: [
+          BoxShadow(
+            color: themeColor.withValues(alpha: 0.12),
+            blurRadius: 16,
+            spreadRadius: 1,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Row(
         children: [
@@ -685,12 +1287,14 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
           Container(
             padding: const EdgeInsets.all(8),
             decoration: BoxDecoration(
-              color: const Color(0xFF00E5FF).withOpacity(0.15),
+              color: themeColor.withValues(alpha: 0.15),
               shape: BoxShape.circle,
             ),
-            child: const Icon(
-              Icons.face_retouching_natural_rounded,
-              color: Color(0xFF00E5FF),
+            child: Icon(
+              isOffline
+                  ? Icons.cloud_off_rounded
+                  : Icons.face_retouching_natural_rounded,
+              color: themeColor,
               size: 22,
             ),
           ),
@@ -700,19 +1304,44 @@ class _FaceMatchCameraScreenState extends State<FaceMatchCameraScreen>
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text(
-                  "Multi-Face Biometric Scanner",
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                  ),
+                Row(
+                  children: [
+                    Text(
+                      isOffline
+                          ? "Offline Biometric Scanner"
+                          : "Multi-Face Biometric Scanner",
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (isOffline) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 5, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF9100).withValues(alpha: 0.25),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text(
+                          "OFFLINE",
+                          style: TextStyle(
+                            color: Color(0xFFFFB74D),
+                            fontSize: 8.5,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
                 const SizedBox(height: 2),
                 Text(
                   _statusMessage,
                   style: TextStyle(
-                    color: Colors.white.withOpacity(0.7),
+                    color: Colors.white.withValues(alpha: 0.7),
                     fontSize: 11.5,
                   ),
                   maxLines: 1,

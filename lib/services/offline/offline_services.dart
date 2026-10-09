@@ -12,9 +12,11 @@
 // [OfflineCacheService] and [OfflinePunchStore].
 
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
 
 import '../../data/models/attendance_history_model.dart';
 import '../../data/models/shift_model.dart';
+import '../../data/url.dart';
 import '../../main_screens/model/checkstatus_model.dart';
 import 'offline_cache_service.dart';
 import 'offline_punch_store.dart';
@@ -22,6 +24,75 @@ import 'shift/shift_window_calculator.dart';
 
 class OfflineServices {
   OfflineServices._();
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // SHIFT AVAILABILITY & NETWORK SYNC
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /// Checks whether a valid shift with defined timings is cached and available for [employeeNo].
+  static Future<bool> isShiftAvailable(String employeeNo) async {
+    final shift = await OfflineCacheService.getShift(employeeNo);
+    return shift != null && shift.hasValidTiming;
+  }
+
+  /// Fetches shift from ShiftMasterAPI for [employeeNo] and caches it.
+  /// Returns the parsed [ShiftModel] if successful, or null on failure.
+  static Future<ShiftModel?> fetchAndCacheShift(String employeeNo) async {
+    try {
+      final uri = Uri.parse('${Url.shiftMaster}?EmployeeNo=$employeeNo');
+      final response = await http.get(uri).timeout(const Duration(seconds: 8));
+
+      if (response.statusCode == 200) {
+        final shift = ShiftModel.firstFromJson(
+          response.body,
+          employeeNo: employeeNo,
+        );
+        if (shift != null) {
+          await OfflineCacheService.cacheShift(employeeNo, shift);
+          if (kDebugMode) {
+            print('[OfflineServices] ✅ Shift cached for $employeeNo: '
+                '${shift.shiftName} (${shift.inTime} – ${shift.outTime})');
+          }
+          return shift;
+        }
+      }
+      return null;
+    } catch (e) {
+      if (kDebugMode) {
+        print('[OfflineServices] ⚠️ fetchAndCacheShift error for $employeeNo: $e');
+      }
+      return null;
+    }
+  }
+
+  /// Fetches attendance history from AttendanceHistory API for [employeeNo] and caches it.
+  /// Returns the parsed list if successful, or null on failure.
+  static Future<List<AttendanceHistoryModel>?> fetchAndCacheAttendanceHistory(
+      String employeeNo) async {
+    try {
+      final uri = Uri.parse('${Url.attendanceHistory}?EmployeeNo=$employeeNo');
+      final response =
+          await http.get(uri).timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final list = AttendanceHistoryModel.listFromJson(
+          response.body,
+          employeeNo: employeeNo,
+        );
+        await OfflineCacheService.cacheHistory(employeeNo, list);
+        if (kDebugMode) {
+          print('[OfflineServices] ✅ History cached for $employeeNo (${list.length} records)');
+        }
+        return list;
+      }
+      return null;
+    } catch (e) {
+      if (kDebugMode) {
+        print('[OfflineServices] ⚠️ fetchAndCacheAttendanceHistory error for $employeeNo: $e');
+      }
+      return null;
+    }
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // PRIMARY: Determine offline check status for [employeeNo]

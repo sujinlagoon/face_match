@@ -63,6 +63,47 @@ class OfflineCacheService {
     await prefs.remove(_historyKey(employeeNo));
   }
 
+  /// Returns a map of employeeNo -> List of [AttendanceHistoryModel] for all attendance histories cached locally.
+  static Future<Map<String, List<AttendanceHistoryModel>>> getAllCachedHistories() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final keys = prefs.getKeys().where((k) => k.startsWith('attendance_history_'));
+      final Map<String, List<AttendanceHistoryModel>> map = {};
+      for (final key in keys) {
+        final empId = key.substring('attendance_history_'.length);
+        if (empId == '0' || empId == '1') {
+          await prefs.remove(key);
+          continue;
+        }
+        final raw = prefs.getString(key);
+        if (raw != null && raw.isNotEmpty) {
+          try {
+            final decoded = jsonDecode(raw) as List<dynamic>;
+            final list = decoded
+                .whereType<Map<String, dynamic>>()
+                .map((j) => AttendanceHistoryModel.fromJson(j, employeeNo: empId))
+                .toList();
+            map[empId] = list;
+          } catch (_) {}
+        }
+      }
+      return map;
+    } catch (e) {
+      if (kDebugMode) print('[OfflineCacheService] ⚠️ getAllCachedHistories error: $e');
+      return {};
+    }
+  }
+
+  /// Clears all cached attendance histories from SharedPreferences.
+  static Future<void> clearAllHistories() async {
+    final prefs = await SharedPreferences.getInstance();
+    final keys = prefs.getKeys().where((k) => k.startsWith('attendance_history_')).toList();
+    for (final key in keys) {
+      await prefs.remove(key);
+    }
+    if (kDebugMode) print('[OfflineCacheService] 🧹 Cleared ${keys.length} cached attendance histories');
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // Derived Check Status
   // ─────────────────────────────────────────────────────────────────────────
@@ -167,6 +208,46 @@ class OfflineCacheService {
   static Future<void> clearShift(String employeeNo) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_shiftKey(employeeNo));
+  }
+
+  /// Returns a map of employeeNo -> ShiftModel for all shifts cached locally.
+  static Future<Map<String, ShiftModel>> getAllCachedShifts() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final keys = prefs.getKeys().where((k) => k.startsWith('shift_'));
+      final Map<String, ShiftModel> map = {};
+      for (final key in keys) {
+        final empId = key.substring('shift_'.length);
+        if (empId == '0' || empId == '1') {
+          await prefs.remove(key);
+          continue;
+        }
+        final raw = prefs.getString(key);
+        if (raw != null && raw.isNotEmpty) {
+          try {
+            final shift = ShiftModel.fromJson(
+              jsonDecode(raw) as Map<String, dynamic>,
+              employeeNo: empId,
+            );
+            map[empId] = shift;
+          } catch (_) {}
+        }
+      }
+      return map;
+    } catch (e) {
+      if (kDebugMode) print('[OfflineCacheService] ⚠️ getAllCachedShifts error: $e');
+      return {};
+    }
+  }
+
+  /// Clears all cached shifts from SharedPreferences.
+  static Future<void> clearAllShifts() async {
+    final prefs = await SharedPreferences.getInstance();
+    final keys = prefs.getKeys().where((k) => k.startsWith('shift_')).toList();
+    for (final key in keys) {
+      await prefs.remove(key);
+    }
+    if (kDebugMode) print('[OfflineCacheService] 🧹 Cleared ${keys.length} cached shifts');
   }
 
   // ─────────────────────────────────────────────────────────────────────────

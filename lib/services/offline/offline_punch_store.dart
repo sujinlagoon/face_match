@@ -83,11 +83,16 @@ class OfflinePunchStore {
   // ─────────────────────────────────────────────────────────────────────────
 
   static Future<bool> hasUnsynced() async {
+    final count = await getUnsyncedCount();
+    return count > 0;
+  }
+
+  static Future<int> getUnsyncedCount() async {
     final db = await getDatabase();
     final result = await db.rawQuery(
       'SELECT COUNT(*) as c FROM $_tableName WHERE synced = 0',
     );
-    return (result.first['c'] as int) > 0;
+    return (result.first['c'] as int?) ?? 0;
   }
 
   static Future<List<Map<String, dynamic>>> getUnsynced() async {
@@ -97,6 +102,24 @@ class OfflinePunchStore {
       where: 'synced = ?',
       whereArgs: [0],
       orderBy: 'id ASC',
+    );
+  }
+
+  static Future<int> deletePunch(int id) async {
+    final db = await getDatabase();
+    return db.delete(
+      _tableName,
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  static Future<int> clearAllUnsynced() async {
+    final db = await getDatabase();
+    return db.delete(
+      _tableName,
+      where: 'synced = ?',
+      whereArgs: [0],
     );
   }
 

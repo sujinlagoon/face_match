@@ -8,6 +8,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import 'helpers/initial_binding.dart';
 import 'helpers/routes.dart';
+import 'widgets/bottom_offline_banner.dart';
 
 class MyHttpOverrides extends HttpOverrides {
   @override
@@ -41,7 +42,7 @@ class MyApp extends StatelessWidget {
             );
           },
           child: GetMaterialApp(
-            title: 'Flutter Demo',
+            title: 'Face Match',
             debugShowCheckedModeBanner: false,
             theme: ThemeData(
               useMaterial3: true,
@@ -50,6 +51,9 @@ class MyApp extends StatelessWidget {
             initialBinding: InitialBinding(),
             initialRoute: AppPages.initial,
             getPages: AppPages.routes,
+            builder: (context, appChild) {
+              return BottomOfflineBannerWrapper(child: appChild);
+            },
           ),
         );
       },

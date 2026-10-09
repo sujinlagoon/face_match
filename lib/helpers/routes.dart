@@ -1,6 +1,7 @@
 import 'package:face_match/main_screens/face_match_camera_screen.dart';
 import 'package:face_match/main_screens/face_register_screen.dart';
 import 'package:face_match/main_screens/main_view.dart';
+import 'package:face_match/main_screens/unsynced_records_view.dart';
 import 'package:get/get.dart';
 
 import '../Login/login_view.dart';
@@ -16,6 +17,7 @@ abstract class Routes {
   static const faceRegister = '/face-register';
   static const faceMatch = '/face-match';
   static const mainView = '/main-view';
+  static const unsyncedRecords = '/unsynced-records';
 }
 
 
@@ -45,6 +47,11 @@ class AppPages {
     GetPage(
       name: Routes.faceMatch,
       page: () => const FaceMatchCameraScreen(storedEmbedding: [], userKey: ""),
+      transition: Transition.rightToLeft,
+    ),
+    GetPage(
+      name: Routes.unsyncedRecords,
+      page: () => const UnsyncedRecordsView(),
       transition: Transition.rightToLeft,
     ),
   ];

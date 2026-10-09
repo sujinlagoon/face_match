@@ -9,7 +9,6 @@ import 'package:get/get.dart';
 import 'package:http/http.dart' as http;
 import 'package:ntp/ntp.dart';
 
-import '../../data/models/attendance_history_model.dart';
 import '../../data/models/shift_model.dart';
 import '../../data/url.dart';
 import '../../helpers/location_service.dart';
@@ -20,6 +19,7 @@ import '../../services/offline/offline_punch_store.dart';
 import '../../services/offline/offline_services.dart';
 import '../../widgets/custom_toast.dart';
 import '../model/profile_face_model.dart';
+import '../model/punch_result_model.dart';
 
 class FaceMatchMatchResult {
   final EmployeeModel employee;
@@ -34,6 +34,8 @@ class FaceMatchMatchResult {
 class FaceMatchController extends GetxController {
   bool isFaceMatch = false;
   String? errorMessage;
+
+  PunchFlowResult? lastPunchResult;
 
   List<EmployeeModel> employeeList = [];
 
@@ -59,6 +61,24 @@ class FaceMatchController extends GetxController {
     isFaceMatch = true;
     errorMessage = null;
     update();
+
+    // Fast check: if offline, immediately load cached profiles without waiting for timeout
+    final bool online = await _isOnline();
+    if (!online) {
+      final cachedList = await OfflineCacheService.getEmployeeList();
+      if (cachedList.isNotEmpty) {
+        employeeList = cachedList;
+        if (kDebugMode) {
+          print(
+            "[FaceMatchController] 📴 Offline: Loaded "
+            "${employeeList.length} employees with embeddings from local cache",
+          );
+        }
+        isFaceMatch = false;
+        update();
+        return true;
+      }
+    }
 
     try {
       final uri = Uri.parse(
@@ -136,6 +156,19 @@ class FaceMatchController extends GetxController {
 
         return true;
       } else {
+        // Fallback to offline cache on non-200 response
+        final cachedList = await OfflineCacheService.getEmployeeList();
+        if (cachedList.isNotEmpty) {
+          employeeList = cachedList;
+          if (kDebugMode) {
+            print(
+              "[FaceMatchController] 📴 Non-200 server response (${response.statusCode}), "
+              "loaded ${employeeList.length} profiles from local cache",
+            );
+          }
+          return true;
+        }
+
         errorMessage =
         "Server returned status ${response.statusCode}";
         return false;
@@ -145,6 +178,19 @@ class FaceMatchController extends GetxController {
         print(
           "[FaceMatchController] Error fetching face profiles: $e",
         );
+      }
+
+      // Fallback to offline cache on network error / timeout
+      final cachedList = await OfflineCacheService.getEmployeeList();
+      if (cachedList.isNotEmpty) {
+        employeeList = cachedList;
+        if (kDebugMode) {
+          print(
+            "[FaceMatchController] 📴 Network error, loaded "
+            "${employeeList.length} profiles from offline cache",
+          );
+        }
+        return true;
       }
 
       errorMessage = e.toString();
@@ -341,26 +387,41 @@ class FaceMatchController extends GetxController {
   /// - When **online**: calls CheckStatus API → newInOut API → caches history.
   /// - When **offline**: resolves status from cached history → stores punch locally.
   ///
-  /// De-duplicated per session via [_checkStatusRequestedEmployees].
-  Future<bool> checkStatusForMatchedEmployee(
-    EmployeeModel employee,
-  ) async {
-    // Employee ID = mobileCode in this project
-    final String? empId = employee.mobileCode;
+  /// Returns [PunchFlowResult] indicating whether the employee checked in or checked out.
+  Future<PunchFlowResult> checkStatusForMatchedEmployee(
+    EmployeeModel employee, {
+    void Function(PunchAction action, bool isOffline)? onStatusResolved,
+  }) async {
+    // Employee ID = effectiveEmployeeNo (primary: mobileCode, then employeeNo)
+    final String empId = employee.effectiveEmployeeNo;
+
+    final String empName = employee.name ?? "Employee";
 
     print("🔥 checkStatusForMatchedEmployee ENTERED");
-    print("🔥 Employee ID (mobileCode): $empId");
+    print("🔥 Employee ID (mobileCode/employeeNo): $empId");
 
-    if (empId == null || empId.isEmpty) {
+    if (empId.isEmpty) {
       print("❌ Employee ID is empty");
       CustomToast.showError("Please check your status");
-      return false;
+      return PunchFlowResult(
+        success: false,
+        timestamp: DateTime.now(),
+        message: "Employee ID is empty",
+        employeeName: empName,
+      );
     }
 
     // Prevent duplicate calls within the same session
     if (_checkStatusRequestedEmployees.contains(empId)) {
       print("⚠️ CheckStatus already requested for: $empId");
-      return true;
+      return lastPunchResult ??
+          PunchFlowResult(
+            success: true,
+            action: null,
+            timestamp: DateTime.now(),
+            employeeNo: empId,
+            employeeName: empName,
+          );
     }
     _checkStatusRequestedEmployees.add(empId);
 
@@ -369,16 +430,40 @@ class FaceMatchController extends GetxController {
       final bool online = await _isOnline();
       print("🌐 Network: ${online ? 'ONLINE' : 'OFFLINE'}");
 
+      PunchFlowResult result;
       if (online) {
-        return await _onlinePunchFlow(empId);
+        result = await _onlinePunchFlow(
+          empId,
+          empName: empName,
+          onStatusResolved: onStatusResolved,
+        );
       } else {
-        return await _offlinePunchFlow(empId);
+        result = await _offlinePunchFlow(
+          empId,
+          empName: empName,
+          onStatusResolved: onStatusResolved,
+        );
       }
+
+      lastPunchResult = result;
+      update();
+      return result;
     } catch (e) {
       print("❌ checkStatusForMatchedEmployee error for $empId: $e");
-      _checkStatusRequestedEmployees.remove(empId);
       CustomToast.showError("Please check your status");
-      return false;
+      final failResult = PunchFlowResult(
+        success: false,
+        timestamp: DateTime.now(),
+        employeeNo: empId,
+        employeeName: empName,
+        message: e.toString(),
+      );
+      lastPunchResult = failResult;
+      update();
+      return failResult;
+    } finally {
+      // Release in-flight lock so subsequent matches can call check status again
+      _checkStatusRequestedEmployees.remove(empId);
     }
   }
 
@@ -386,7 +471,11 @@ class FaceMatchController extends GetxController {
   // ONLINE PUNCH FLOW
   // ============================================================
 
-  Future<bool> _onlinePunchFlow(String empId) async {
+  Future<PunchFlowResult> _onlinePunchFlow(
+    String empId, {
+    String? empName,
+    void Function(PunchAction action, bool isOffline)? onStatusResolved,
+  }) async {
     print("🔥 [ONLINE] Starting online punch flow for $empId");
 
     // 1. Fetch shift from server and cache it (stores employeeNo on model)
@@ -411,7 +500,8 @@ class FaceMatchController extends GetxController {
         checkedInForShift: unsyncedStatus.toLowerCase() == 'checkin',
       );
     } else {
-      // 3. Check Status API
+      // 3. Check Status API — always clear cached status first so we call status API fresh
+      employeeCheckStatusMap.remove(empId);
       final bool statusSuccess = await getCheckStatus(empId: empId);
       final List<CheckStatusModel>? statusList = employeeCheckStatusMap[empId];
 
@@ -426,6 +516,14 @@ class FaceMatchController extends GetxController {
 
     print("✅ [ONLINE] CHECK STATUS: ${employeeStatus.status} for $empId");
 
+    final String? checkType = _resolveCheckType(employeeStatus.status ?? '');
+    final PunchAction action = (checkType != null && checkType.toUpperCase().contains('IN'))
+        ? PunchAction.checkIn
+        : PunchAction.checkOut;
+
+    // Notify UI that status has been resolved before API call
+    onStatusResolved?.call(action, false);
+
     // 4. newInOut API
     final bool punchSuccess = await newInOut(
       empId: empId,
@@ -433,29 +531,59 @@ class FaceMatchController extends GetxController {
     );
 
     if (!punchSuccess) {
-      print("❌ [ONLINE] Punch failed for $empId");
-      _checkStatusRequestedEmployees.remove(empId);
-      CustomToast.showError("Unable to update your status");
-      return false;
+      print("⚠️ [ONLINE] Online punch failed for $empId — falling back to offline punch flow");
+      return await _offlinePunchFlow(
+        empId,
+        empName: empName,
+        onStatusResolved: onStatusResolved,
+      );
     }
 
-    print("✅ [ONLINE] Punch success for $empId");
+    // Punch succeeded: clear cached status map so next match calls status API fresh
+    employeeCheckStatusMap.remove(empId);
+
+    print("✅ [ONLINE] Punch success for $empId (${action == PunchAction.checkIn ? 'Check-In' : 'Check-Out'})");
 
     // 5. Fetch + cache attendance history for future offline use
     await _fetchAndCacheAttendanceHistory(empId);
 
-    return true;
+    return PunchFlowResult(
+      success: true,
+      action: action,
+      isOffline: false,
+      timestamp: DateTime.now(),
+      employeeNo: empId,
+      employeeName: empName,
+    );
   }
 
   // ============================================================
   // OFFLINE PUNCH FLOW
   // ============================================================
 
-  Future<bool> _offlinePunchFlow(String empId) async {
+  Future<PunchFlowResult> _offlinePunchFlow(
+    String empId, {
+    String? empName,
+    void Function(PunchAction action, bool isOffline)? onStatusResolved,
+  }) async {
     print("📴 [OFFLINE] Resolving status from OfflineServices for $empId");
 
     // 1. Load cached shift (used for shift-window-aware status resolution)
     final shift = await OfflineCacheService.getShift(empId);
+    if (shift == null || !shift.hasValidTiming) {
+      print("❌ [OFFLINE] Shift not available for $empId — offline check not allowed");
+      CustomToast.showError(
+        "Shift not available for ${empName ?? 'Employee'}. Offline check not allowed.",
+      );
+      return PunchFlowResult(
+        success: false,
+        timestamp: DateTime.now(),
+        employeeNo: empId,
+        employeeName: empName,
+        isOffline: true,
+        message: "Shift not available. Offline check not allowed.",
+      );
+    }
 
     // 2. Resolve status: unsynced SQLite → cached history → derived cache → default
     final CheckStatusModel offlineStatus =
@@ -468,9 +596,21 @@ class FaceMatchController extends GetxController {
     if (checkType == null) {
       print("❌ [OFFLINE] Unrecognised status: ${offlineStatus.status}");
       CustomToast.showError("Please check your status");
-      _checkStatusRequestedEmployees.remove(empId);
-      return false;
+      return PunchFlowResult(
+        success: false,
+        timestamp: DateTime.now(),
+        employeeNo: empId,
+        employeeName: empName,
+        message: "Unrecognised status: ${offlineStatus.status}",
+      );
     }
+
+    final PunchAction action = checkType.toUpperCase().contains('IN')
+        ? PunchAction.checkIn
+        : PunchAction.checkOut;
+
+    // Notify UI that status has been resolved before local punch store
+    onStatusResolved?.call(action, true);
 
     // 4. Collect location + NTP time + device ID
     LocationDataResult locData;
@@ -507,9 +647,18 @@ class FaceMatchController extends GetxController {
       shift:      shift,
     );
 
-    print("✅ [OFFLINE] Punch stored locally: $checkType for $empId");
-    CustomToast.showSuccess("Punch saved offline — will sync when online");
-    return true;
+    print("✅ [OFFLINE] Punch stored locally: $checkType for $empId (${action == PunchAction.checkIn ? 'Check-In' : 'Check-Out'})");
+    if (Get.isRegistered<NetworkController>()) {
+      Get.find<NetworkController>().notifyOfflinePunchSaved();
+    }
+    return PunchFlowResult(
+      success: true,
+      action: action,
+      isOffline: true,
+      timestamp: punchTime,
+      employeeNo: empId,
+      employeeName: empName,
+    );
   }
 
   // ============================================================
@@ -520,33 +669,7 @@ class FaceMatchController extends GetxController {
   /// Called after every successful online punch. Non-fatal on failure.
   Future<void> _fetchAndCacheAttendanceHistory(String employeeNo) async {
     try {
-      final uri = Uri.parse(
-        '${Url.attendanceHistory}?EmployeeNo=$employeeNo',
-      );
-
-      if (kDebugMode) {
-        print('[FaceMatchController] Fetching history for $employeeNo: $uri');
-      }
-
-      final response = await http
-          .get(uri)
-          .timeout(const Duration(seconds: 10));
-
-      if (response.statusCode == 200) {
-        final list = AttendanceHistoryModel.listFromJson(
-          response.body,
-          employeeNo: employeeNo,
-        );
-        await OfflineCacheService.cacheHistory(employeeNo, list);
-
-        if (kDebugMode) {
-          print('[FaceMatchController] ✅ History cached for $employeeNo (${list.length} records)');
-        }
-      } else {
-        if (kDebugMode) {
-          print('[FaceMatchController] ⚠️ History API ${response.statusCode} for $employeeNo');
-        }
-      }
+      await OfflineServices.fetchAndCacheAttendanceHistory(employeeNo);
     } catch (e) {
       // Non-fatal — the punch already succeeded
       if (kDebugMode) {
@@ -563,26 +686,10 @@ class FaceMatchController extends GetxController {
   /// Called at the start of every online punch flow. Non-fatal on failure.
   Future<void> _fetchAndCacheShift(String employeeNo) async {
     try {
-      final uri = Uri.parse('${Url.shiftMaster}?EmployeeNo=$employeeNo');
-      final response =
-          await http.get(uri).timeout(const Duration(seconds: 8));
-
-      if (response.statusCode == 200) {
-        final shift = ShiftModel.firstFromJson(
-          response.body,
-          employeeNo: employeeNo,
-        );
-        if (shift != null) {
-          await OfflineCacheService.cacheShift(employeeNo, shift);
-          if (kDebugMode) {
-            print('[FaceMatchController] ✅ Shift cached for $employeeNo: '
-                '${shift.shiftName} (${shift.inTime} – ${shift.outTime})');
-          }
-        }
-      } else {
-        if (kDebugMode) {
-          print('[FaceMatchController] ⚠️ Shift API ${response.statusCode} for $employeeNo');
-        }
+      final shift = await OfflineServices.fetchAndCacheShift(employeeNo);
+      if (shift != null && kDebugMode) {
+        print('[FaceMatchController] ✅ Shift cached for $employeeNo: '
+            '${shift.shiftName} (${shift.inTime} – ${shift.outTime})');
       }
     } catch (e) {
       if (kDebugMode) {
@@ -790,7 +897,9 @@ class FaceMatchController extends GetxController {
 
       print("🚀 FULL PUNCH URL: $requestUri");
 
-      final response = await http.get(requestUri);
+      final response = await http
+          .get(requestUri)
+          .timeout(const Duration(seconds: 10));
 
       if (response.statusCode == 200) {
         print("✅ PUNCH SUCCESS: $empId");

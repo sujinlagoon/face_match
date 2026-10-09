@@ -67,6 +67,30 @@ class EmployeeModel {
 
   bool? isNewVersionNeeded;
 
+  /// Effective employee identifier used throughout the application.
+  /// Priority:
+  /// 1. [mobileCode] (Primary employee code in this system, e.g. "LTDEMO111241")
+  /// 2. [employeeNo] (if non-empty and not '0')
+  /// 3. [enrollmentId] (if non-empty)
+  /// 4. [employeeId] (only if non-zero integer)
+  String get effectiveEmployeeNo {
+    if (mobileCode != null && mobileCode!.trim().isNotEmpty) {
+      return mobileCode!.trim();
+    }
+    if (employeeNo != null &&
+        employeeNo!.trim().isNotEmpty &&
+        employeeNo!.trim() != '0') {
+      return employeeNo!.trim();
+    }
+    if (enrollmentId != null && enrollmentId!.trim().isNotEmpty) {
+      return enrollmentId!.trim();
+    }
+    if (employeeId != null && employeeId != 0) {
+      return employeeId.toString();
+    }
+    return '';
+  }
+
   EmployeeModel({
     this.employeeId,
     this.name,

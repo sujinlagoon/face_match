@@ -1,11 +1,16 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:get/get.dart';
 
 import '../helpers/colors.dart';
 import '../helpers/routes.dart';
+import '../services/network/network_controller.dart';
+import '../services/offline/offline_punch_store.dart';
+import 'debug/debug_settings_view.dart';
 import 'face_match_camera_screen.dart';
 import 'face_register_screen.dart';
+import 'unsynced_records_view.dart';
 
 class MainView extends StatelessWidget {
   final String employeeId;
@@ -33,12 +38,166 @@ class MainView extends StatelessWidget {
         elevation: 0,
         automaticallyImplyLeading: false,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.logout_rounded, color: Colors.white),
-            tooltip: 'Logout',
-            onPressed: () {
-              Get.offAllNamed(Routes.login);
+          // Unsynced Records Quick Icon with Badge
+          if (Get.isRegistered<NetworkController>())
+            Obx(() {
+              final count = Get.find<NetworkController>().pendingCount.value;
+              return Stack(
+                alignment: Alignment.center,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.cloud_sync_rounded, color: Colors.white),
+                    tooltip: 'Unsynced Records',
+                    onPressed: () async {
+                      await Get.to(
+                        () => const UnsyncedRecordsView(),
+                        transition: Transition.rightToLeft,
+                      );
+                      Get.find<NetworkController>().refreshPendingOfflineCount();
+                    },
+                  ),
+                  if (count > 0)
+                    Positioned(
+                      top: 8.h,
+                      right: 8.w,
+                      child: Container(
+                        padding: EdgeInsets.all(3.r),
+                        decoration: const BoxDecoration(
+                          color: Color(0xFFFF9100),
+                          shape: BoxShape.circle,
+                        ),
+                        constraints: BoxConstraints(
+                          minWidth: 16.w,
+                          minHeight: 16.w,
+                        ),
+                        child: Text(
+                          count > 99 ? '99+' : '$count',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 9.sp,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            })
+          else
+            FutureBuilder<int>(
+              future: OfflinePunchStore.getUnsyncedCount(),
+              builder: (context, snapshot) {
+                final count = snapshot.data ?? 0;
+                return Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.cloud_sync_rounded, color: Colors.white),
+                      tooltip: 'Unsynced Records',
+                      onPressed: () {
+                        Get.to(
+                          () => const UnsyncedRecordsView(),
+                          transition: Transition.rightToLeft,
+                        );
+                      },
+                    ),
+                    if (count > 0)
+                      Positioned(
+                        top: 8.h,
+                        right: 8.w,
+                        child: Container(
+                          padding: EdgeInsets.all(3.r),
+                          decoration: const BoxDecoration(
+                            color: Color(0xFFFF9100),
+                            shape: BoxShape.circle,
+                          ),
+                          constraints: BoxConstraints(
+                            minWidth: 16.w,
+                            minHeight: 16.w,
+                          ),
+                          child: Text(
+                            count > 99 ? '99+' : '$count',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 9.sp,
+                              fontWeight: FontWeight.bold,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+
+          // Menu with navigation options
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert_rounded, color: Colors.white),
+            tooltip: 'Menu',
+            color: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12.r),
+            ),
+            onSelected: (value) async {
+              if (value == 'unsynced') {
+                await Get.to(
+                  () => const UnsyncedRecordsView(),
+                  transition: Transition.rightToLeft,
+                );
+                if (Get.isRegistered<NetworkController>()) {
+                  Get.find<NetworkController>().refreshPendingOfflineCount();
+                }
+              } else if (value == 'logout') {
+                Get.offAllNamed(Routes.login);
+              }
             },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'unsynced',
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.cloud_sync_rounded,
+                      color: const Color(0xFFFF9100),
+                      size: 20.sp,
+                    ),
+                    SizedBox(width: 12.w),
+                    Text(
+                      'Unsynced Records',
+                      style: TextStyle(
+                        fontSize: 13.sp,
+                        fontWeight: FontWeight.w600,
+                        color: const Color(0xFF2B2D42),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const PopupMenuDivider(),
+              PopupMenuItem(
+                value: 'logout',
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.logout_rounded,
+                      color: Colors.redAccent,
+                      size: 20.sp,
+                    ),
+                    SizedBox(width: 12.w),
+                    Text(
+                      'Logout',
+                      style: TextStyle(
+                        fontSize: 13.sp,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.redAccent,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -117,7 +276,50 @@ class MainView extends StatelessWidget {
               //   ),
               // ),
 
-              SizedBox(height: 32.h),
+              SizedBox(height: 24.h),
+
+              // Timetick-style Offline Pending Chip
+              if (Get.isRegistered<NetworkController>())
+                Obx(() {
+                  final netCtrl = Get.find<NetworkController>();
+                  final count = netCtrl.pendingCount.value;
+                  if (count >= 1) {
+                    return Padding(
+                      padding: EdgeInsets.only(bottom: 20.h),
+                      child: _OfflinePendingChip(
+                        count: count,
+                        onTap: () async {
+                          await Get.to(
+                            () => const UnsyncedRecordsView(),
+                            transition: Transition.rightToLeft,
+                          );
+                          netCtrl.refreshPendingOfflineCount();
+                        },
+                      ),
+                    );
+                  }
+                  return const SizedBox.shrink();
+                })
+              else
+                FutureBuilder<int>(
+                  future: OfflinePunchStore.getUnsyncedCount(),
+                  builder: (context, snapshot) {
+                    final count = snapshot.data ?? 0;
+                    if (count >= 1) {
+                      return Padding(
+                        padding: EdgeInsets.only(bottom: 20.h),
+                        child: _OfflinePendingChip(
+                          count: count,
+                          onTap: () => Get.to(
+                            () => const UnsyncedRecordsView(),
+                            transition: Transition.rightToLeft,
+                          ),
+                        ),
+                      );
+                    }
+                    return const SizedBox.shrink();
+                  },
+                ),
 
               // Section Header
               Text(
@@ -149,14 +351,17 @@ class MainView extends StatelessWidget {
                 icon: Icons.center_focus_strong_rounded,
                 badgeText: 'Verify',
                 badgeColor: AppColors.primary,
-                onTap: () {
-                  Get.to(
+                onTap: () async {
+                  await Get.to(
                     () => FaceMatchCameraScreen(
                       userKey: employeeId,
                       timeKeeperId: employeeId,
                     ),
                     transition: Transition.rightToLeft,
                   );
+                  if (Get.isRegistered<NetworkController>()) {
+                    Get.find<NetworkController>().refreshPendingOfflineCount();
+                  }
                 },
               ),
 
@@ -171,19 +376,67 @@ class MainView extends StatelessWidget {
                 icon: Icons.person_add_alt_1_rounded,
                 badgeText: 'Register',
                 badgeColor: AppColors.primaryLight,
-                onTap: () {
-                  Get.to(
+                onTap: () async {
+                  await Get.to(
                     () => FaceRegisterScreen(
                       employeeId: employeeId,
                     ),
                     transition: Transition.rightToLeft,
                   );
+                  if (Get.isRegistered<NetworkController>()) {
+                    Get.find<NetworkController>().refreshPendingOfflineCount();
+                  }
+                },
+              ),
+
+              SizedBox(height: 20.h),
+
+              // Unsynced Records Card / Button
+              _buildActionCard(
+                context: context,
+                title: 'Unsynced Records',
+                subtitle:
+                    'Review offline attendance punches and synchronize with server.',
+                icon: Icons.cloud_sync_rounded,
+                badgeText: 'Offline',
+                badgeColor: const Color(0xFFFF9100),
+                onTap: () async {
+                  await Get.to(
+                    () => const UnsyncedRecordsView(),
+                    transition: Transition.rightToLeft,
+                  );
+                  if (Get.isRegistered<NetworkController>()) {
+                    Get.find<NetworkController>().refreshPendingOfflineCount();
+                  }
                 },
               ),
             ],
           ),
         ),
       ),
+      floatingActionButton: kDebugMode
+          ? FloatingActionButton.extended(
+              heroTag: 'debug_settings_fab',
+              backgroundColor: const Color(0xFF1E293B),
+              elevation: 4,
+              icon: const Icon(Icons.tune_rounded, color: Colors.white, size: 20),
+              label: Text(
+                'Debug Menu',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 13.sp,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.3,
+                ),
+              ),
+              onPressed: () {
+                Get.to(
+                  () => const DebugSettingsView(),
+                  transition: Transition.rightToLeft,
+                );
+              },
+            )
+          : null,
     );
   }
 
@@ -206,8 +459,8 @@ class MainView extends StatelessWidget {
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 12,
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 10,
             offset: const Offset(0, 4),
           ),
         ],
@@ -218,10 +471,10 @@ class MainView extends StatelessWidget {
         child: InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(16.r),
-          splashColor: badgeColor.withOpacity(0.1),
-          highlightColor: badgeColor.withOpacity(0.05),
+          splashColor: badgeColor.withValues(alpha: 0.1),
+          highlightColor: badgeColor.withValues(alpha: 0.05),
           child: Padding(
-            padding: EdgeInsets.all(18.r),
+            padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 16.h),
             child: Row(
               children: [
                 // Icon Box
@@ -229,7 +482,7 @@ class MainView extends StatelessWidget {
                   width: 52.w,
                   height: 52.w,
                   decoration: BoxDecoration(
-                    color: badgeColor.withOpacity(0.1),
+                    color: badgeColor.withValues(alpha: 0.1),
                     borderRadius: BorderRadius.circular(12.r),
                   ),
                   child: Icon(
@@ -238,7 +491,7 @@ class MainView extends StatelessWidget {
                     color: badgeColor,
                   ),
                 ),
-                SizedBox(width: 16.w),
+                SizedBox(width: 14.w),
 
                 // Title & Subtitle
                 Expanded(
@@ -247,22 +500,26 @@ class MainView extends StatelessWidget {
                     children: [
                       Row(
                         children: [
-                          Text(
-                            title,
-                            style: TextStyle(
-                              fontSize: 16.sp,
-                              fontWeight: FontWeight.bold,
-                              color: const Color(0xFF2B2D42),
+                          Flexible(
+                            child: Text(
+                              title,
+                              style: TextStyle(
+                                fontSize: 15.sp,
+                                fontWeight: FontWeight.bold,
+                                color: const Color(0xFF2B2D42),
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
                           ),
-                          SizedBox(width: 8.w),
+                          SizedBox(width: 6.w),
                           Container(
                             padding: EdgeInsets.symmetric(
-                              horizontal: 8.w,
+                              horizontal: 7.w,
                               vertical: 2.h,
                             ),
                             decoration: BoxDecoration(
-                              color: badgeColor.withOpacity(0.12),
+                              color: badgeColor.withValues(alpha: 0.12),
                               borderRadius: BorderRadius.circular(6.r),
                             ),
                             child: Text(
@@ -299,6 +556,90 @@ class MainView extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Offline pending records card styled after Timetick's _OfflinePendingChip
+class _OfflinePendingChip extends StatelessWidget {
+  final int count;
+  final VoidCallback onTap;
+
+  const _OfflinePendingChip({
+    required this.count,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20.r),
+        child: Container(
+          width: double.infinity,
+          padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 12.h),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFF3E0),
+            borderRadius: BorderRadius.circular(20.r),
+            border: Border.all(color: const Color(0xFFFFCC80), width: 1.2),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFFFF9100).withValues(alpha: 0.12),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                padding: EdgeInsets.all(7.r),
+                decoration: const BoxDecoration(
+                  color: Color(0xFFFFE0B2),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.cloud_off_outlined,
+                  size: 20.sp,
+                  color: const Color(0xFFE65100),
+                ),
+              ),
+              SizedBox(width: 12.w),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '$count offline punch${count == 1 ? '' : 'es'} pending',
+                      style: TextStyle(
+                        fontSize: 13.5.sp,
+                        fontWeight: FontWeight.w700,
+                        color: const Color(0xFFBF360C),
+                      ),
+                    ),
+                    SizedBox(height: 2.h),
+                    Text(
+                      'Tap to view and synchronize with server',
+                      style: TextStyle(
+                        fontSize: 11.sp,
+                        color: const Color(0xFFE65100).withValues(alpha: 0.85),
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: const Color(0xFFE65100),
+                size: 24.sp,
+              ),
+            ],
           ),
         ),
       ),

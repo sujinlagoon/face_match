@@ -1,6 +1,7 @@
 // shift_window_calculator.dart
 //
 // Pure-logic shift window calculator for face_match offline services.
+// Computes active punch windows based on ShiftModel buffers & policies.
 // No Flutter / GetX / SQLite dependencies — fully unit-testable.
 
 import '../../../data/models/shift_model.dart';
@@ -18,21 +19,41 @@ class ShiftWindow {
   final DateTime end;
   final bool overnight;
   final String source;
+  final DateTime? shiftIn;
+  final DateTime? shiftOut;
+  final Duration preBuffer;
+  final Duration postBuffer;
+  final bool allowPreShiftCheckIn;
+  final bool allowPostShiftCheckOut;
 
   const ShiftWindow({
     required this.start,
     required this.end,
     required this.overnight,
     required this.source,
+    this.shiftIn,
+    this.shiftOut,
+    this.preBuffer = const Duration(hours: 1),
+    this.postBuffer = const Duration(hours: 8),
+    this.allowPreShiftCheckIn = true,
+    this.allowPostShiftCheckOut = true,
   });
 
   /// Returns true when [dt] falls inside [start, end).
   bool contains(DateTime dt) => !dt.isBefore(start) && dt.isBefore(end);
 
+  /// Returns true if [dt] occurs before shift scheduled start.
+  bool isBeforeShiftIn(DateTime dt) =>
+      shiftIn != null && dt.isBefore(shiftIn!);
+
+  /// Returns true if [dt] occurs after shift scheduled end.
+  bool isAfterShiftOut(DateTime dt) =>
+      shiftOut != null && dt.isAfter(shiftOut!);
+
   @override
   String toString() =>
       'ShiftWindow[$source](${start.toIso8601String()} '
-      '- ${end.toIso8601String()}, overnight=$overnight)';
+      '- ${end.toIso8601String()}, overnight=$overnight, preBuffer=${preBuffer.inMinutes}m, postBuffer=${postBuffer.inMinutes}m)';
 }
 
 /// Parsed hour/minute/second triple from a shift time string.
@@ -51,8 +72,13 @@ class ShiftClock {
 /// Computes the active punch window for a given [ShiftModel] and reference time.
 ///
 /// ### Window definition
-///   window.start = shiftIn  - 1 h   (early-arrival buffer)
-///   window.end   = shiftOut + 8 h   (late checkout / auto-out buffer)
+///   window.start = shiftIn  - preShiftBuffer   (early-arrival buffer if allowPreShiftCheckIn)
+///   window.end   = shiftOut + postShiftBuffer  (overtime buffer if allowPostShiftCheckOut)
+///
+/// ### Policies
+///   - [allowPreShiftCheckIn]  : When false, window starts strictly at [shiftIn].
+///   - [allowPostShiftCheckOut] : When false, window ends strictly at [shiftOut].
+///   - Default buffers: 1 hour pre-shift buffer, 8 hours post-shift buffer.
 ///
 /// ### Overnight shifts
 /// When outTime <= inTime the shift crosses midnight. Two candidates are
@@ -65,8 +91,8 @@ class ShiftClock {
 class ShiftWindowCalculator {
   ShiftWindowCalculator._();
 
-  static const Duration kPreShiftBuffer  = Duration(hours: 1);
-  static const Duration kPostShiftBuffer = Duration(hours: 8);
+  static const Duration kDefaultPreShiftBuffer  = Duration(hours: 1);
+  static const Duration kDefaultPostShiftBuffer = Duration(hours: 8);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Primary API
@@ -95,10 +121,37 @@ class ShiftWindowCalculator {
 
     final bool overnight = outClock.totalMinutes <= inClock.totalMinutes;
 
-    final ShiftWindow todayWindow =
-        _buildWindow(day, inClock, outClock, overnight);
-    final ShiftWindow yesterdayWindow =
-        _buildWindow(day.subtract(const Duration(days: 1)), inClock, outClock, overnight);
+    // Evaluate policies from ShiftModel (defaults: allow=true, pre=1h, post=8h)
+    final bool allowPre = shift?.allowPreShiftCheckIn ?? true;
+    final Duration preBuffer = allowPre
+        ? (shift?.preShiftBuffer ?? kDefaultPreShiftBuffer)
+        : Duration.zero;
+
+    final bool allowPost = shift?.allowPostShiftCheckOut ?? true;
+    final Duration postBuffer = allowPost
+        ? (shift?.postShiftBuffer ?? kDefaultPostShiftBuffer)
+        : Duration.zero;
+
+    final ShiftWindow todayWindow = _buildWindow(
+      baseDay: day,
+      inClock: inClock,
+      outClock: outClock,
+      overnight: overnight,
+      preBuffer: preBuffer,
+      postBuffer: postBuffer,
+      allowPreShiftCheckIn: allowPre,
+      allowPostShiftCheckOut: allowPost,
+    );
+    final ShiftWindow yesterdayWindow = _buildWindow(
+      baseDay: day.subtract(const Duration(days: 1)),
+      inClock: inClock,
+      outClock: outClock,
+      overnight: overnight,
+      preBuffer: preBuffer,
+      postBuffer: postBuffer,
+      allowPreShiftCheckIn: allowPre,
+      allowPostShiftCheckOut: allowPost,
+    );
 
     if (todayWindow.contains(now)) return todayWindow;
     if (yesterdayWindow.contains(now)) return yesterdayWindow;
@@ -122,7 +175,8 @@ class ShiftWindowCalculator {
       window.contains(dt);
 
   /// Calendar date (midnight) of the shift day — used as attendance punchDate key.
-  static DateTime shiftDay(ShiftWindow window) => _dayOnly(window.start);
+  static DateTime shiftDay(ShiftWindow window) =>
+      window.shiftIn != null ? _dayOnly(window.shiftIn!) : _dayOnly(window.start);
 
   /// Public clock parser — exposed for testing and OfflineServices.
   static ShiftClock? parseClock(String? raw) => _parseClock(raw);
@@ -131,12 +185,16 @@ class ShiftWindowCalculator {
   // Internals
   // ──────────────────────────────────────────────────────────────────────────
 
-  static ShiftWindow _buildWindow(
-    DateTime baseDay,
-    ShiftClock inClock,
-    ShiftClock outClock,
-    bool overnight,
-  ) {
+  static ShiftWindow _buildWindow({
+    required DateTime baseDay,
+    required ShiftClock inClock,
+    required ShiftClock outClock,
+    required bool overnight,
+    required Duration preBuffer,
+    required Duration postBuffer,
+    required bool allowPreShiftCheckIn,
+    required bool allowPostShiftCheckOut,
+  }) {
     final DateTime shiftIn  = _atClock(baseDay, inClock);
     final DateTime shiftOut = overnight
         ? _atClock(baseDay.add(const Duration(days: 1)), outClock)
@@ -148,10 +206,16 @@ class ShiftWindowCalculator {
         : (isToday ? 'day_shift'   : 'day_shift_prev');
 
     return ShiftWindow(
-      start: shiftIn.subtract(kPreShiftBuffer),
-      end:   shiftOut.add(kPostShiftBuffer),
+      start: shiftIn.subtract(preBuffer),
+      end:   shiftOut.add(postBuffer),
       overnight: overnight,
       source: src,
+      shiftIn: shiftIn,
+      shiftOut: shiftOut,
+      preBuffer: preBuffer,
+      postBuffer: postBuffer,
+      allowPreShiftCheckIn: allowPreShiftCheckIn,
+      allowPostShiftCheckOut: allowPostShiftCheckOut,
     );
   }
 
